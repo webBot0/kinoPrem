@@ -1,5 +1,5 @@
 const { Telegraf, Markup } = require('telegraf');
-const admin = require('firebase-admin');
+const mongoose = require('mongoose');
 const http = require('http');
 require('dotenv').config();
 
@@ -12,33 +12,65 @@ http.createServer((req, res) => {
     console.log(`📡 Mini-server ${port}-portda ishlamoqda`);
 });
 
-// 2. Firebase Initialization
-if (!process.env.FB_PROJECT_ID || !process.env.FB_CLIENT_EMAIL || !process.env.FB_PRIVATE_KEY) {
-    console.error("❌ XATO: Firebase o'zgaruvchilari (FB_PROJECT_ID, FB_CLIENT_EMAIL, FB_PRIVATE_KEY) topilmadi!");
+// 2. MongoDB Initialization
+const MONGO_URI = process.env.MONGO_URI || process.env.MONGODB_URI;
+
+if (!MONGO_URI) {
+    console.error("❌ XATO: MongoDB o'zgaruvchisi (MONGO_URI) topilmadi!");
     process.exit(1);
 }
 
-try {
-    admin.initializeApp({
-        credential: admin.credential.cert({
-            projectId: process.env.FB_PROJECT_ID,
-            clientEmail: process.env.FB_CLIENT_EMAIL,
-            privateKey: process.env.FB_PRIVATE_KEY.replace(/\\n/g, '\n'),
-        })
+mongoose.connect(MONGO_URI)
+    .then(() => console.log("✅ MongoDB muvaffaqiyatli ulandi"))
+    .catch((error) => {
+        console.error("❌ MongoDB ulanishda xato:", error.message);
+        process.exit(1);
     });
-    console.log("✅ Firebase muvaffaqiyatli ulandi");
-} catch (error) {
-    console.error("❌ Firebase ulanishda xato:", error.message);
-    process.exit(1);
-}
 
-const db = admin.firestore();
+// 3. MongoDB Schemas & Models
+const userSchema = new mongoose.Schema({
+    userId: { type: Number, required: true, unique: true },
+    name: { type: String, default: '' },
+    status: { type: String, default: 'active' },
+    createdAt: { type: Date, default: Date.now },
+    lastActive: { type: Date, default: Date.now }
+});
+const User = mongoose.model('User', userSchema);
+
+const channelSchema = new mongoose.Schema({
+    channelId: { type: String, required: true },
+    link: { type: String, required: true },
+    name: { type: String, required: true }
+});
+const Channel = mongoose.model('Channel', channelSchema);
+
+const channel2Schema = new mongoose.Schema({
+    channelId: { type: String, required: true },
+    link: { type: String, required: true },
+    name: { type: String, required: true }
+});
+const Channel2 = mongoose.model('Channel2', channel2Schema);
+
+const requestSchema = new mongoose.Schema({
+    userId: { type: Number, required: true },
+    channelId: { type: String, required: true },
+    timestamp: { type: Date, default: Date.now }
+});
+requestSchema.index({ userId: 1, channelId: 1 }, { unique: true });
+const Request = mongoose.model('Request', requestSchema);
+
+const configSchema = new mongoose.Schema({
+    key: { type: String, required: true, unique: true },
+    mandatoryLink: { type: String, default: '' }
+});
+const Config = mongoose.model('Config', configSchema);
+
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const ADMIN_ID = parseInt(process.env.ADMIN_ID);
 
 let adminState = {};
 
-// 3. Yordamchi funksiyalar
+// 4. Yordamchi funksiyalar
 async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -46,26 +78,26 @@ async function sleep(ms) {
 // Foydalanuvchi obunasini va zayafkasini tekshirish
 async function getUnsubscribedChannels(ctx, collectionName = 'channels') {
     const userId = ctx.from.id;
-    const channelsSnapshot = await db.collection(collectionName).get();
+    const Model = collectionName === 'channels2' ? Channel2 : Channel;
+    const channels = await Model.find();
     const unsubscribed = [];
 
-    for (const doc of channelsSnapshot.docs) {
-        const ch = doc.data();
+    for (const ch of channels) {
         try {
             const member = await ctx.telegram.getChatMember(ch.channelId, userId);
             const isMember = ['member', 'administrator', 'creator'].includes(member.status);
 
             if (!isMember) {
                 // Agar a'zo bo'lmasa, zayafka yuborganmi tekshiramiz
-                const requestDoc = await db.collection('requests').doc(`${userId}_${ch.channelId}`).get();
-                if (!requestDoc.exists) {
+                const requestDoc = await Request.findOne({ userId: userId, channelId: ch.channelId.toString() });
+                if (!requestDoc) {
                     unsubscribed.push(ch);
                 }
             }
         } catch (e) {
             // Agar xato bo'lsa (masalan bot kanalda admin emas), zayafkani bazadan tekshiramiz
-            const requestDoc = await db.collection('requests').doc(`${userId}_${ch.channelId}`).get();
-            if (!requestDoc.exists) {
+            const requestDoc = await Request.findOne({ userId: userId, channelId: ch.channelId.toString() });
+            if (!requestDoc) {
                 unsubscribed.push(ch);
             }
         }
@@ -73,31 +105,21 @@ async function getUnsubscribedChannels(ctx, collectionName = 'channels') {
     return unsubscribed;
 }
 
-// 4. Start Buyrug'i
+// 5. Start Buyrug'i
 async function sendStart(ctx) {
     try {
         const userId = ctx.from.id;
-        const userName = ctx.from.first_name;
+        const userName = ctx.from.first_name || '';
 
         // Foydalanuvchini saqlash yoki yangilash
-        const userRef = db.collection('users').doc(userId.toString());
-        const userDoc = await userRef.get();
-
-        if (!userDoc.exists) {
-            await userRef.set({
-                userId: userId,
-                name: userName,
-                createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                status: 'active',
-                lastActive: admin.firestore.FieldValue.serverTimestamp()
-            });
-        } else {
-            await userRef.update({
-                name: userName,
-                status: 'active',
-                lastActive: admin.firestore.FieldValue.serverTimestamp()
-            });
-        }
+        await User.findOneAndUpdate(
+            { userId: userId },
+            {
+                $set: { name: userName, status: 'active', lastActive: new Date() },
+                $setOnInsert: { createdAt: new Date() }
+            },
+            { upsert: true, new: true }
+        );
 
         if (userId === ADMIN_ID) {
             return ctx.reply("🛠 Admin Panelga xush kelibsiz:", Markup.keyboard([
@@ -127,15 +149,15 @@ bot.on('chat_join_request', async (ctx) => {
     try {
         const userId = ctx.from.id;
         const channelId = ctx.chat.id.toString();
-        await db.collection('requests').doc(`${userId}_${channelId}`).set({
-            userId,
-            channelId,
-            timestamp: admin.firestore.FieldValue.serverTimestamp()
-        });
+        await Request.findOneAndUpdate(
+            { userId: userId, channelId: channelId },
+            { userId: userId, channelId: channelId, timestamp: new Date() },
+            { upsert: true, new: true }
+        );
     } catch (e) { console.error("Join Request Error:", e); }
 });
 
-// 5. Obunani tekshirish (Callback)
+// 6. Obunani tekshirish (Callback)
 bot.action('check_sub', async (ctx) => {
     try {
         const unsubbed = await getUnsubscribedChannels(ctx, 'channels');
@@ -169,8 +191,8 @@ bot.action('check_sub_2', async (ctx) => {
 
         const unsubbed2 = await getUnsubscribedChannels(ctx, 'channels2');
         if (unsubbed2.length === 0) {
-            const settings = await db.collection('config').doc('settings').get();
-            const link = settings.exists ? settings.data().mandatoryLink : null;
+            const settings = await Config.findOne({ key: 'settings' });
+            const link = settings ? settings.mandatoryLink : null;
             if (link) {
                 await ctx.editMessageText(`✅ To'g'ri! Marhamat, kino linki:\n\n${link}`);
             } else {
@@ -187,27 +209,16 @@ bot.action('check_sub_2', async (ctx) => {
     } catch (e) { console.error("Sub 2 Action Error:", e); }
 });
 
-// 6. Admin Funksiyalari
+// 7. Admin Funksiyalari
 bot.hears('📊 Statistika', async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return;
 
-    const now = Date.now();
-    const last24h = new Date(now - 24 * 60 * 60 * 1000);
+    const last24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-    const usersSnapshot = await db.collection('users').get();
-    const totalUsers = usersSnapshot.size;
-
-    let active24h = 0;
-    let blockedCount = 0;
-
-    usersSnapshot.forEach(doc => {
-        const data = doc.data();
-        if (data.status === 'blocked') blockedCount++;
-        if (data.lastActive && data.lastActive.toDate() > last24h) active24h++;
-    });
-
-    const channelsSnapshot = await db.collection('channels').get();
-    const channelsCount = channelsSnapshot.size;
+    const totalUsers = await User.countDocuments();
+    const active24h = await User.countDocuments({ lastActive: { $gte: last24h } });
+    const blockedCount = await User.countDocuments({ status: 'blocked' });
+    const channelsCount = await Channel.countDocuments();
 
     ctx.reply(`📊 *Bot statistikasi:*\n\n` +
         `👤 Jami foydalanuvchilar: ${totalUsers}\n` +
@@ -224,27 +235,26 @@ bot.hears('➕ Kanal qo\'shish', (ctx) => {
 
 bot.hears('🗑 Kanallarni boshqarish', async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return;
-    const snapshot = await db.collection('channels').get();
-    if (snapshot.empty) return ctx.reply("Hech qanday kanal ulanmagan.");
+    const channels = await Channel.find();
+    if (channels.length === 0) return ctx.reply("Hech qanday kanal ulanmagan.");
 
-    for (const doc of snapshot.docs) {
-        const ch = doc.data();
+    for (const ch of channels) {
         ctx.reply(`Nomi: ${ch.name}\nID: ${ch.channelId}\nLink: ${ch.link}`,
-            Markup.inlineKeyboard([[Markup.button.callback("❌ O'chirish", `del_${doc.id}`)]]));
+            Markup.inlineKeyboard([[Markup.button.callback("❌ O'chirish", `del_${ch._id}`)]]));
     }
 });
 
 bot.action(/^del_(.+)$/, async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return;
-    await db.collection('channels').doc(ctx.match[1]).delete();
+    await Channel.findByIdAndDelete(ctx.match[1]);
     ctx.answerCbQuery("O'chirildi!");
     ctx.editMessageText("🗑 Kanal o'chirildi.");
 });
 
 bot.hears('🔗 Majburiy Link', async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return;
-    const settings = await db.collection('config').doc('settings').get();
-    const currentLink = settings.exists ? settings.data().mandatoryLink : "O'rnatilmagan";
+    const settings = await Config.findOne({ key: 'settings' });
+    const currentLink = settings && settings.mandatoryLink ? settings.mandatoryLink : "O'rnatilmagan";
 
     adminState[ctx.from.id] = { step: 'set_mandatory_link' };
     ctx.reply(`Hozirgi majburiy link: ${currentLink}\n\nYangi linkni yuboring:`);
@@ -258,19 +268,18 @@ bot.hears('➕ Majbur-2 qo\'shish', (ctx) => {
 
 bot.hears('🗑 Majbur-2 boshqarish', async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return;
-    const snapshot = await db.collection('channels2').get();
-    if (snapshot.empty) return ctx.reply("Hech qanday Majbur-2 kanali ulanmagan.");
+    const channels2 = await Channel2.find();
+    if (channels2.length === 0) return ctx.reply("Hech qanday Majbur-2 kanali ulanmagan.");
 
-    for (const doc of snapshot.docs) {
-        const ch = doc.data();
+    for (const ch of channels2) {
         ctx.reply(`Majbur-2: ${ch.name}\nID: ${ch.channelId}\nLink: ${ch.link}`,
-            Markup.inlineKeyboard([[Markup.button.callback("❌ O'chirish", `del2_${doc.id}`)]]));
+            Markup.inlineKeyboard([[Markup.button.callback("❌ O'chirish", `del2_${ch._id}`)]]));
     }
 });
 
 bot.action(/^del2_(.+)$/, async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return;
-    await db.collection('channels2').doc(ctx.match[1]).delete();
+    await Channel2.findByIdAndDelete(ctx.match[1]);
     ctx.answerCbQuery("O'chirildi!");
     ctx.editMessageText("🗑 Majbur-2 kanali o'chirildi.");
 });
@@ -293,7 +302,7 @@ bot.action('msg_forward', ctx => {
     ctx.reply("Uzatish (forward) uchun xabarni menga yuboring:");
 });
 
-// 7. Xabarlarni qayta ishlash
+// 8. Xabarlarni qayta ishlash
 bot.on('message', async (ctx) => {
     const userId = ctx.from.id;
     const message = ctx.message;
@@ -312,13 +321,17 @@ bot.on('message', async (ctx) => {
             return ctx.reply("Tugma uchun nom yuboring (masalan: Kanal 1):");
         }
         if (state.step === 'add_ch_name') {
-            await db.collection('channels').add({ channelId: state.id, link: state.link, name: text });
+            await Channel.create({ channelId: state.id, link: state.link, name: text });
             delete adminState[userId];
             return ctx.reply("✅ Kanal muvaffaqiyatli qo'shildi!");
         }
 
         if (state.step === 'set_mandatory_link') {
-            await db.collection('config').doc('settings').set({ mandatoryLink: text }, { merge: true });
+            await Config.findOneAndUpdate(
+                { key: 'settings' },
+                { mandatoryLink: text },
+                { upsert: true, new: true }
+            );
             delete adminState[userId];
             return ctx.reply("✅ Majburiy link yangilandi!");
         }
@@ -333,7 +346,7 @@ bot.on('message', async (ctx) => {
             return ctx.reply("Tugma uchun nom yuboring:");
         }
         if (state.step === 'add_ch2_name') {
-            await db.collection('channels2').add({ channelId: state.id, link: state.link, name: text });
+            await Channel2.create({ channelId: state.id, link: state.link, name: text });
             delete adminState[userId];
             return ctx.reply("✅ Majbur-2 kanali muvaffaqiyatli qo'shildi!");
         }
@@ -379,8 +392,8 @@ bot.on('message', async (ctx) => {
                 return ctx.reply("⚠️ Iltimos, quyidagi kanallarimga ham obuna bo'ling!", Markup.inlineKeyboard(buttons));
             }
 
-            const settings = await db.collection('config').doc('settings').get();
-            const link = settings.exists ? settings.data().mandatoryLink : null;
+            const settings = await Config.findOne({ key: 'settings' });
+            const link = settings ? settings.mandatoryLink : null;
 
             if (link) {
                 ctx.reply(`✅ Kod qabul qilindi. Marhamat, quyidagi link orqali ko'rishingiz mumkin:\n\n${link}`);
@@ -393,17 +406,16 @@ bot.on('message', async (ctx) => {
     }
 });
 
-// 8. Reklama Funksiyasi
+// 9. Reklama Funksiyasi
 async function broadcast(ctx, msgId, isForward, kb = null) {
-    const usersSnapshot = await db.collection('users').get();
-    const total = usersSnapshot.size;
+    const users = await User.find();
+    const total = users.length;
     ctx.reply(`🚀 ${total} kishiga yuborish boshlandi...`);
 
     let count = 0;
     let blocked = 0;
 
-    for (const doc of usersSnapshot.docs) {
-        const u = doc.data();
+    for (const u of users) {
         try {
             if (isForward) {
                 await ctx.telegram.forwardMessage(u.userId, ctx.from.id, msgId);
@@ -414,7 +426,7 @@ async function broadcast(ctx, msgId, isForward, kb = null) {
             if (count % 25 === 0) await sleep(1000);
         } catch (e) {
             if (e.response && (e.response.error_code === 403 || e.response.error_code === 400)) {
-                await db.collection('users').doc(u.userId.toString()).update({ status: 'blocked' });
+                await User.updateOne({ userId: u.userId }, { status: 'blocked' });
                 blocked++;
             }
         }
@@ -435,12 +447,12 @@ bot.action('btn_no', ctx => {
     delete adminState[ctx.from.id];
 });
 
-// 9. Global Xatolarni boshqarish
+// 10. Global Xatolarni boshqarish
 bot.catch((err) => {
     console.error("🔴 Global xato:", err.message);
 });
 
-// 10. Botni ishga tushirish
+// 11. Botni ishga tushirish
 bot.launch()
     .then(() => console.log("🚀 Bot muvaffaqiyatli ishga tushdi!"))
     .catch((err) => console.error("❌ Bot ishga tushmadi:", err));
