@@ -32,6 +32,9 @@ const userSchema = new mongoose.Schema({
     userId: { type: Number, required: true, unique: true },
     name: { type: String, default: '' },
     status: { type: String, default: 'active' },
+    isPremium: { type: Boolean, default: false },
+    premiumExpiresAt: { type: Date, default: null },
+    premiumType: { type: String, default: null }, // '1_day', '1_week', '1_month', 'vip'
     createdAt: { type: Date, default: Date.now },
     lastActive: { type: Date, default: Date.now }
 });
@@ -61,7 +64,8 @@ const Request = mongoose.model('Request', requestSchema);
 
 const configSchema = new mongoose.Schema({
     key: { type: String, required: true, unique: true },
-    mandatoryLink: { type: String, default: '' }
+    mandatoryLink: { type: String, default: '' },
+    cardDetails: { type: String, default: '8600 0000 0000 0000 (Admin)' }
 });
 const Config = mongoose.model('Config', configSchema);
 
@@ -69,6 +73,15 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 const ADMIN_ID = parseInt(process.env.ADMIN_ID);
 
 let adminState = {};
+let userState = {};
+
+// Tariflar ro'yxati
+const TARIFFS = {
+    '1_day': { name: '1-kunlik', price: '7 000 so\'m', days: 1 },
+    '1_week': { name: '1-haftalik', price: '15 000 so\'m', days: 7 },
+    '1_month': { name: '1-oylik', price: '30 000 so\'m', days: 30 },
+    'vip': { name: 'VIP (Cheksiz)', price: '45 000 so\'m', days: null }
+};
 
 // 4. Yordamchi funksiyalar
 async function sleep(ms) {
@@ -88,14 +101,12 @@ async function getUnsubscribedChannels(ctx, collectionName = 'channels') {
             const isMember = ['member', 'administrator', 'creator'].includes(member.status);
 
             if (!isMember) {
-                // Agar a'zo bo'lmasa, zayafka yuborganmi tekshiramiz
                 const requestDoc = await Request.findOne({ userId: userId, channelId: ch.channelId.toString() });
                 if (!requestDoc) {
                     unsubscribed.push(ch);
                 }
             }
         } catch (e) {
-            // Agar xato bo'lsa (masalan bot kanalda admin emas), zayafkani bazadan tekshiramiz
             const requestDoc = await Request.findOne({ userId: userId, channelId: ch.channelId.toString() });
             if (!requestDoc) {
                 unsubscribed.push(ch);
@@ -105,6 +116,31 @@ async function getUnsubscribedChannels(ctx, collectionName = 'channels') {
     return unsubscribed;
 }
 
+// Premium faolligini tekshirish
+async function checkUserPremium(user) {
+    if (!user || !user.isPremium) return false;
+    if (user.premiumType === 'vip') return true;
+    if (user.premiumExpiresAt && new Date(user.premiumExpiresAt) > new Date()) {
+        return true;
+    }
+    // Premium muddati tugagan
+    user.isPremium = false;
+    user.premiumType = null;
+    user.premiumExpiresAt = null;
+    await user.save();
+    return false;
+}
+
+// Tariflar klaviaturasini yaratish
+function getTariffKeyboard() {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback("1-kunlik — 7 000 so'm", "tariff_1_day")],
+        [Markup.button.callback("1-haftalik — 15 000 so'm", "tariff_1_week")],
+        [Markup.button.callback("1-oylik — 30 000 so'm", "tariff_1_month")],
+        [Markup.button.callback("👑 VIP (Cheksiz) — 45 000 so'm", "tariff_vip")]
+    ]);
+}
+
 // 5. Start Buyrug'i
 async function sendStart(ctx) {
     try {
@@ -112,7 +148,7 @@ async function sendStart(ctx) {
         const userName = ctx.from.first_name || '';
 
         // Foydalanuvchini saqlash yoki yangilash
-        await User.findOneAndUpdate(
+        let user = await User.findOneAndUpdate(
             { userId: userId },
             {
                 $set: { name: userName, status: 'active', lastActive: new Date() },
@@ -125,19 +161,27 @@ async function sendStart(ctx) {
             return ctx.reply("🛠 Admin Panelga xush kelibsiz:", Markup.keyboard([
                 ['📊 Statistika', '📢 Xabar yuborish'],
                 ['➕ Kanal qo\'shish', '🗑 Kanallarni boshqarish'],
-                ['➕ Majbur-2 qo\'shish', '🗑 Majbur-2 boshqarish'],
-                ['🔗 Majburiy Link']
+                ['💳 Karta raqami', '🔗 Majburiy Link'],
+                ['➕ Majbur-2 qo\'shish', '🗑 Majbur-2 boshqarish']
             ]).resize());
         }
 
-        const unsubbed = await getUnsubscribedChannels(ctx);
+        const unsubbed = await getUnsubscribedChannels(ctx, 'channels');
 
-        if (unsubbed.length === 0) {
-            return ctx.reply(`👋 Xush kelibsiz ${userName}! Marhamat, kino kodini yuboring.`);
-        } else {
+        if (unsubbed.length > 0) {
             const buttons = unsubbed.map((l) => [Markup.button.url(l.name, l.link)]);
             buttons.push([Markup.button.callback("✅ Tekshirish", "check_sub")]);
             return ctx.reply("🔴 Botdan foydalanish uchun quyidagi kanallarga obuna bo'ling yoki so'rov yuboring:", Markup.inlineKeyboard(buttons));
+        }
+
+        const isPremium = await checkUserPremium(user);
+        if (isPremium) {
+            return ctx.reply(`👋 Xush kelibsiz ${userName}!\n✨ Premium obunangiz faol. Marhamat, kino kodini yuboring.`);
+        } else {
+            return ctx.reply(`👋 Xush kelibsiz ${userName}!\n\n🔒 Botdan kino olish uchun *Premium obuna* sotib olishingiz kerak.\n\nQuyidagi tariflardan birini tanlang:`, {
+                parse_mode: 'Markdown',
+                ...getTariffKeyboard()
+            });
         }
     } catch (e) { console.error("Start Error:", e); }
 }
@@ -162,51 +206,75 @@ bot.action('check_sub', async (ctx) => {
     try {
         const unsubbed = await getUnsubscribedChannels(ctx, 'channels');
         if (unsubbed.length === 0) {
-            await ctx.editMessageText("✅ Rahmat! Obuna tasdiqlandi. Endi kod yuborishingiz mumkin.");
+            const userId = ctx.from.id;
+            let user = await User.findOne({ userId });
+            const isPremium = await checkUserPremium(user);
+
+            if (isPremium) {
+                await ctx.editMessageText("✅ Obuna tasdiqlandi! Premium obunangiz faol. Marhamat, kino kodini yuboring.");
+            } else {
+                await ctx.editMessageText("✅ Kanallarga obuna tasdiqlandi!\n\n🔒 Endi kino kodini yuborish va kinolarni ko'rish uchun *Premium obuna* tanlang:", {
+                    parse_mode: 'Markdown',
+                    ...getTariffKeyboard()
+                });
+            }
         } else {
             const buttons = unsubbed.map((l) => [Markup.button.url(l.name, l.link)]);
             buttons.push([Markup.button.callback("✅ Tekshirish", "check_sub")]);
             
             try {
                 await ctx.editMessageReplyMarkup({ inline_keyboard: buttons });
-            } catch (err) {
-                // Ignore error if markup is the same
-            }
+            } catch (err) {}
             await ctx.answerCbQuery("❌ Shartni to'liq bajaring", { show_alert: true });
         }
     } catch (e) { console.error("Action error:", e); }
 });
 
-bot.action('check_sub_2', async (ctx) => {
+// Tarif tanlanganda
+bot.action(/^tariff_(.+)$/, async (ctx) => {
     try {
-        const unsubbed1 = await getUnsubscribedChannels(ctx, 'channels');
-        if (unsubbed1.length > 0) {
-            const buttons = unsubbed1.map((l) => [Markup.button.url(l.name, l.link)]);
-            buttons.push([Markup.button.callback("✅ Tekshirish", "check_sub")]);
-            try {
-                await ctx.editMessageReplyMarkup({ inline_keyboard: buttons });
-            } catch (err) {}
-            return ctx.answerCbQuery("❌ Oldin asosiy kanallarga a'zo bo'ling!", { show_alert: true });
-        }
+        const tariffKey = ctx.match[1];
+        const tariff = TARIFFS[tariffKey];
+        if (!tariff) return ctx.answerCbQuery("Xatolik: Tarif topilmadi.");
 
-        const unsubbed2 = await getUnsubscribedChannels(ctx, 'channels2');
-        if (unsubbed2.length === 0) {
-            const settings = await Config.findOne({ key: 'settings' });
-            const link = settings ? settings.mandatoryLink : null;
-            if (link) {
-                await ctx.editMessageText(`✅ To'g'ri! Marhamat, kino linki:\n\n${link}`);
-            } else {
-                await ctx.editMessageText("❌ Xatolik: Admin tomonidan link o'rnatilmagan.");
-            }
-        } else {
-            const buttons = unsubbed2.map((l) => [Markup.button.url(l.name, l.link)]);
-            buttons.push([Markup.button.callback("✅ Tekshirish", "check_sub_2")]);
-            try {
-                await ctx.editMessageReplyMarkup({ inline_keyboard: buttons });
-            } catch (err) {}
-            await ctx.answerCbQuery("❌ Shartni to'liq bajaring", { show_alert: true });
-        }
-    } catch (e) { console.error("Sub 2 Action Error:", e); }
+        userState[ctx.from.id] = { step: 'selected_tariff', tariff: tariffKey };
+
+        const settings = await Config.findOne({ key: 'settings' });
+        const cardDetails = settings && settings.cardDetails ? settings.cardDetails : '8600 0000 0000 0000 (Admin)';
+
+        const text = `💳 *To'lov ma'lumotlari*\n\n` +
+            `📦 *Tanlangan tarif:* ${tariff.name}\n` +
+            `💵 *To'lov summasi:* ${tariff.price}\n\n` +
+            `💳 *Karta raqami:* \`${cardDetails}\`\n\n` +
+            `⚠️ To'lovni amalga oshirgach, pastdagi *"💳 Chek yuborish"* tugmasini bosing va chek (rasm) yuboring!`;
+
+        await ctx.editMessageText(text, {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+                [Markup.button.callback("💳 Chek yuborish", `send_receipt_${tariffKey}`)],
+                [Markup.button.callback("⬅️ Orqaga", "back_to_tariffs")]
+            ])
+        });
+    } catch (e) { console.error("Tariff action error:", e); }
+});
+
+bot.action('back_to_tariffs', async (ctx) => {
+    try {
+        delete userState[ctx.from.id];
+        await ctx.editMessageText("🔒 *Premium obuna* tariflaridan birini tanlang:", {
+            parse_mode: 'Markdown',
+            ...getTariffKeyboard()
+        });
+    } catch (e) { console.error("Back to tariffs error:", e); }
+});
+
+bot.action(/^send_receipt_(.+)$/, async (ctx) => {
+    try {
+        const tariffKey = ctx.match[1];
+        userState[ctx.from.id] = { step: 'awaiting_receipt', tariff: tariffKey };
+        await ctx.reply("📸 Iltimos, to'lov cheki rasmini (veya skrinshotini) yuboring:");
+        await ctx.answerCbQuery();
+    } catch (e) { console.error("Send receipt error:", e); }
 });
 
 // 7. Admin Funksiyalari
@@ -217,11 +285,13 @@ bot.hears('📊 Statistika', async (ctx) => {
 
     const totalUsers = await User.countDocuments();
     const active24h = await User.countDocuments({ lastActive: { $gte: last24h } });
+    const premiumUsers = await User.countDocuments({ isPremium: true });
     const blockedCount = await User.countDocuments({ status: 'blocked' });
     const channelsCount = await Channel.countDocuments();
 
     ctx.reply(`📊 *Bot statistikasi:*\n\n` +
         `👤 Jami foydalanuvchilar: ${totalUsers}\n` +
+        `👑 Premium foydalanuvchilar: ${premiumUsers}\n` +
         `✅ Faol (24s): ${active24h}\n` +
         `🚫 Bloklaganlar: ${blockedCount}\n` +
         `📢 Ulangan kanallar: ${channelsCount}`, { parse_mode: 'Markdown' });
@@ -249,6 +319,15 @@ bot.action(/^del_(.+)$/, async (ctx) => {
     await Channel.findByIdAndDelete(ctx.match[1]);
     ctx.answerCbQuery("O'chirildi!");
     ctx.editMessageText("🗑 Kanal o'chirildi.");
+});
+
+bot.hears('💳 Karta raqami', async (ctx) => {
+    if (ctx.from.id !== ADMIN_ID) return;
+    const settings = await Config.findOne({ key: 'settings' });
+    const card = settings && settings.cardDetails ? settings.cardDetails : "8600 0000 0000 0000 (Admin)";
+
+    adminState[ctx.from.id] = { step: 'set_card_details' };
+    ctx.reply(`Hozirgi karta raqami: ${card}\n\nYangi karta raqami va ma'lumotlarini yuboring:`);
 });
 
 bot.hears('🔗 Majburiy Link', async (ctx) => {
@@ -302,6 +381,66 @@ bot.action('msg_forward', ctx => {
     ctx.reply("Uzatish (forward) uchun xabarni menga yuboring:");
 });
 
+// Admin To'lovni tasdiqlash callback lari
+bot.action(/^approve_(\d+)_(.+)$/, async (ctx) => {
+    if (ctx.from.id !== ADMIN_ID) return;
+
+    try {
+        const targetUserId = parseInt(ctx.match[1]);
+        const tariffKey = ctx.match[2];
+        const tariff = TARIFFS[tariffKey];
+
+        if (!tariff) return ctx.answerCbQuery("Xato: Tarif topilmadi");
+
+        let expiresAt = null;
+        if (tariff.days) {
+            expiresAt = new Date(Date.now() + tariff.days * 24 * 60 * 60 * 1000);
+        }
+
+        await User.findOneAndUpdate(
+            { userId: targetUserId },
+            {
+                isPremium: true,
+                premiumType: tariffKey,
+                premiumExpiresAt: expiresAt
+            }
+        );
+
+        await ctx.answerCbQuery("✅ Obuna faollashtirildi!");
+
+        const origCaption = ctx.callbackQuery.message.caption || ctx.callbackQuery.message.text || '';
+        await ctx.editMessageCaption(origCaption + `\n\n✅ *TO'LOV TASDIQLANDI! Obuna faollashtirildi.*`, { parse_mode: 'Markdown' });
+
+        try {
+            await ctx.telegram.sendMessage(targetUserId, `🎉 *Sizning to'lovingiz tasdiqlandi!*\n\n✨ **${tariff.name}** Premium obunangiz faollashtirildi. Endi kinolarni kodingiz orqali tomosha qilishingiz mumkin!\n\nMarhamat, kino kodini yuboring:`, { parse_mode: 'Markdown' });
+        } catch (err) {
+            console.error("Foydalanuvchiga tasdiqlash xabari yuborishda xato:", err.message);
+        }
+    } catch (e) {
+        console.error("Approve action error:", e);
+    }
+});
+
+bot.action(/^reject_(\d+)$/, async (ctx) => {
+    if (ctx.from.id !== ADMIN_ID) return;
+
+    try {
+        const targetUserId = parseInt(ctx.match[1]);
+        await ctx.answerCbQuery("❌ Rad etildi.");
+
+        const origCaption = ctx.callbackQuery.message.caption || ctx.callbackQuery.message.text || '';
+        await ctx.editMessageCaption(origCaption + `\n\n❌ *TO'LOV RAD ETILDI.*`, { parse_mode: 'Markdown' });
+
+        try {
+            await ctx.telegram.sendMessage(targetUserId, `❌ *Siz yuborgan to'lov cheki rad etildi.*\n\nQayta to'lov qilib chek yuborishingiz yoki adminga murojaat qilishingiz mumkin.`, { parse_mode: 'Markdown' });
+        } catch (err) {
+            console.error("Foydalanuvchiga rad xabari yuborishda xato:", err.message);
+        }
+    } catch (e) {
+        console.error("Reject action error:", e);
+    }
+});
+
 // 8. Xabarlarni qayta ishlash
 bot.on('message', async (ctx) => {
     const userId = ctx.from.id;
@@ -324,6 +463,16 @@ bot.on('message', async (ctx) => {
             await Channel.create({ channelId: state.id, link: state.link, name: text });
             delete adminState[userId];
             return ctx.reply("✅ Kanal muvaffaqiyatli qo'shildi!");
+        }
+
+        if (state.step === 'set_card_details') {
+            await Config.findOneAndUpdate(
+                { key: 'settings' },
+                { cardDetails: text },
+                { upsert: true, new: true }
+            );
+            delete adminState[userId];
+            return ctx.reply("✅ Karta raqami va ma'lumotlari yangilandi!");
         }
 
         if (state.step === 'set_mandatory_link') {
@@ -373,7 +522,54 @@ bot.on('message', async (ctx) => {
         }
     }
 
-    // Foydalanuvchi xabari
+    // Foydalanuvchi chek yuborishi
+    if (userState[userId] && userState[userId].step === 'awaiting_receipt') {
+        const isPhoto = message.photo && message.photo.length > 0;
+        const isDocument = message.document && message.document.mime_type && message.document.mime_type.startsWith('image/');
+
+        if (isPhoto || isDocument) {
+            const tariffKey = userState[userId].tariff;
+            const tariff = TARIFFS[tariffKey] || { name: "Noma'lum", price: '-' };
+
+            const uName = ctx.from.first_name || '';
+            const uUsername = ctx.from.username ? `@${ctx.from.username}` : "Mavjud emas";
+            const uId = ctx.from.id;
+
+            const caption = `📥 *YANGI TO'LOV CHEKI!*\n\n` +
+                `👤 *Foydalanuvchi:* ${uName}\n` +
+                `🆔 *ID:* \`${uId}\`\n` +
+                `🏷 *Username:* ${uUsername}\n` +
+                `📦 *Tanlangan tarif:* ${tariff.name}\n` +
+                `💵 *Summa:* ${tariff.price}`;
+
+            const keyboard = Markup.inlineKeyboard([
+                [
+                    Markup.button.callback("✅ Tasdiqlash", `approve_${uId}_${tariffKey}`),
+                    Markup.button.callback("❌ Rad etish", `reject_${uId}`)
+                ]
+            ]);
+
+            try {
+                if (isPhoto) {
+                    const fileId = message.photo[message.photo.length - 1].file_id;
+                    await ctx.telegram.sendPhoto(ADMIN_ID, fileId, { caption, parse_mode: 'Markdown', ...keyboard });
+                } else {
+                    const fileId = message.document.file_id;
+                    await ctx.telegram.sendDocument(ADMIN_ID, fileId, { caption, parse_mode: 'Markdown', ...keyboard });
+                }
+
+                delete userState[userId];
+                return ctx.reply("✅ Chekingiz adminga yuborildi! Admin tekshirib obunani faollashtirgach sizga bildirishnoma boradi.");
+            } catch (err) {
+                console.error("Adminga chek yuborishda xato:", err);
+                return ctx.reply("❌ Chekni adminga yuborishda xatolik yuz berdi. Iltimos qaytadan urinib ko'ring.");
+            }
+        } else {
+            return ctx.reply("⚠️ Iltimos, to'lov chekining rasmini yuboring!");
+        }
+    }
+
+    // Foydalanuvchi xabari / Kod yuborishi
     if (text && !text.startsWith('/')) {
         const unsubbed1 = await getUnsubscribedChannels(ctx, 'channels');
         if (unsubbed1.length > 0) {
@@ -384,12 +580,14 @@ bot.on('message', async (ctx) => {
 
         // Agar matn faqat raqamlardan iborat bo'lsa (Kino kodi)
         if (/^\d+$/.test(text)) {
-            // Endi Majbur-2 tekshiramiz
-            const unsubbed2 = await getUnsubscribedChannels(ctx, 'channels2');
-            if (unsubbed2.length > 0) {
-                const buttons = unsubbed2.map((l) => [Markup.button.url(l.name, l.link)]);
-                buttons.push([Markup.button.callback("✅ Tekshirish", "check_sub_2")]);
-                return ctx.reply("⚠️ Iltimos, quyidagi kanallarimga ham obuna bo'ling!", Markup.inlineKeyboard(buttons));
+            let user = await User.findOne({ userId });
+            const isPremium = await checkUserPremium(user);
+
+            if (!isPremium) {
+                return ctx.reply("🔒 *Kinolarni ko'rish uchun Premium obuna zarur!*\n\nIltimos, quyidagi tariflardan birini tanlang va to'lov qiling:", {
+                    parse_mode: 'Markdown',
+                    ...getTariffKeyboard()
+                });
             }
 
             const settings = await Config.findOne({ key: 'settings' });
