@@ -88,6 +88,14 @@ async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function escapeHTML(str) {
+    if (!str) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
 // Foydalanuvchi obunasini va zayafkasini tekshirish
 async function getUnsubscribedChannels(ctx, collectionName = 'channels') {
     const userId = ctx.from.id;
@@ -176,10 +184,10 @@ async function sendStart(ctx) {
 
         const isPremium = await checkUserPremium(user);
         if (isPremium) {
-            return ctx.reply(`👋 Xush kelibsiz ${userName}!\n✨ Premium obunangiz faol. Marhamat, kino kodini yuboring.`);
+            return ctx.reply(`👋 Xush kelibsiz ${escapeHTML(userName)}!\n✨ Premium obunangiz faol. Marhamat, kino kodini yuboring.`);
         } else {
-            return ctx.reply(`👋 Xush kelibsiz ${userName}!\n\n🔒 Botdan kino olish uchun *Premium obuna* sotib olishingiz kerak.\n\nQuyidagi tariflardan birini tanlang:`, {
-                parse_mode: 'Markdown',
+            return ctx.reply(`👋 Xush kelibsiz ${escapeHTML(userName)}!\n\n🔒 Botdan kino olish uchun <b>Premium obuna</b> sotib olishingiz kerak.\n\nQuyidagi tariflardan birini tanlang:`, {
+                parse_mode: 'HTML',
                 ...getTariffKeyboard()
             });
         }
@@ -213,8 +221,8 @@ bot.action('check_sub', async (ctx) => {
             if (isPremium) {
                 await ctx.editMessageText("✅ Obuna tasdiqlandi! Premium obunangiz faol. Marhamat, kino kodini yuboring.");
             } else {
-                await ctx.editMessageText("✅ Kanallarga obuna tasdiqlandi!\n\n🔒 Endi kino kodini yuborish va kinolarni ko'rish uchun *Premium obuna* tanlang:", {
-                    parse_mode: 'Markdown',
+                await ctx.editMessageText("✅ Kanallarga obuna tasdiqlandi!\n\n🔒 Endi kino kodini yuborish va kinolarni ko'rish uchun <b>Premium obuna</b> tanlang:", {
+                    parse_mode: 'HTML',
                     ...getTariffKeyboard()
                 });
             }
@@ -242,14 +250,14 @@ bot.action(/^tariff_(.+)$/, async (ctx) => {
         const settings = await Config.findOne({ key: 'settings' });
         const cardDetails = settings && settings.cardDetails ? settings.cardDetails : '8600 0000 0000 0000 (Admin)';
 
-        const text = `💳 *To'lov ma'lumotlari*\n\n` +
-            `📦 *Tanlangan tarif:* ${tariff.name}\n` +
-            `💵 *To'lov summasi:* ${tariff.price}\n\n` +
-            `💳 *Karta raqami:* \`${cardDetails}\`\n\n` +
-            `⚠️ To'lovni amalga oshirgach, pastdagi *"💳 Chek yuborish"* tugmasini bosing va chek (rasm) yuboring!`;
+        const text = `💳 <b>To'lov ma'lumotlari</b>\n\n` +
+            `📦 <b>Tanlangan tarif:</b> ${escapeHTML(tariff.name)}\n` +
+            `💵 <b>To'lov summasi:</b> ${escapeHTML(tariff.price)}\n\n` +
+            `💳 <b>Karta raqami:</b> <code>${escapeHTML(cardDetails)}</code>\n\n` +
+            `⚠️ To'lovni amalga oshirgach, pastdagi <i>"💳 Chek yuborish"</i> tugmasini bosing va chek (rasm) yuboring!`;
 
         await ctx.editMessageText(text, {
-            parse_mode: 'Markdown',
+            parse_mode: 'HTML',
             ...Markup.inlineKeyboard([
                 [Markup.button.callback("💳 Chek yuborish", `send_receipt_${tariffKey}`)],
                 [Markup.button.callback("⬅️ Orqaga", "back_to_tariffs")]
@@ -261,8 +269,8 @@ bot.action(/^tariff_(.+)$/, async (ctx) => {
 bot.action('back_to_tariffs', async (ctx) => {
     try {
         delete userState[ctx.from.id];
-        await ctx.editMessageText("🔒 *Premium obuna* tariflaridan birini tanlang:", {
-            parse_mode: 'Markdown',
+        await ctx.editMessageText("🔒 <b>Premium obuna</b> tariflaridan birini tanlang:", {
+            parse_mode: 'HTML',
             ...getTariffKeyboard()
         });
     } catch (e) { console.error("Back to tariffs error:", e); }
@@ -289,12 +297,12 @@ bot.hears('📊 Statistika', async (ctx) => {
     const blockedCount = await User.countDocuments({ status: 'blocked' });
     const channelsCount = await Channel.countDocuments();
 
-    ctx.reply(`📊 *Bot statistikasi:*\n\n` +
+    ctx.reply(`📊 <b>Bot statistikasi:</b>\n\n` +
         `👤 Jami foydalanuvchilar: ${totalUsers}\n` +
         `👑 Premium foydalanuvchilar: ${premiumUsers}\n` +
         `✅ Faol (24s): ${active24h}\n` +
         `🚫 Bloklaganlar: ${blockedCount}\n` +
-        `📢 Ulangan kanallar: ${channelsCount}`, { parse_mode: 'Markdown' });
+        `📢 Ulangan kanallar: ${channelsCount}`, { parse_mode: 'HTML' });
 });
 
 bot.hears('➕ Kanal qo\'shish', (ctx) => {
@@ -409,10 +417,10 @@ bot.action(/^approve_(\d+)_(.+)$/, async (ctx) => {
         await ctx.answerCbQuery("✅ Obuna faollashtirildi!");
 
         const origCaption = ctx.callbackQuery.message.caption || ctx.callbackQuery.message.text || '';
-        await ctx.editMessageCaption(origCaption + `\n\n✅ *TO'LOV TASDIQLANDI! Obuna faollashtirildi.*`, { parse_mode: 'Markdown' });
+        await ctx.editMessageCaption(origCaption + `\n\n✅ <b>TO'LOV TASDIQLANDI! Obuna faollashtirildi.</b>`, { parse_mode: 'HTML' });
 
         try {
-            await ctx.telegram.sendMessage(targetUserId, `🎉 *Sizning to'lovingiz tasdiqlandi!*\n\n✨ **${tariff.name}** Premium obunangiz faollashtirildi. Endi kinolarni kodingiz orqali tomosha qilishingiz mumkin!\n\nMarhamat, kino kodini yuboring:`, { parse_mode: 'Markdown' });
+            await ctx.telegram.sendMessage(targetUserId, `🎉 <b>Sizning to'lovingiz tasdiqlandi!</b>\n\n✨ <b>${escapeHTML(tariff.name)}</b> Premium obunangiz faollashtirildi. Endi kinolarni kodingiz orqali tomosha qilishingiz mumkin!\n\nMarhamat, kino kodini yuboring:`, { parse_mode: 'HTML' });
         } catch (err) {
             console.error("Foydalanuvchiga tasdiqlash xabari yuborishda xato:", err.message);
         }
@@ -429,10 +437,10 @@ bot.action(/^reject_(\d+)$/, async (ctx) => {
         await ctx.answerCbQuery("❌ Rad etildi.");
 
         const origCaption = ctx.callbackQuery.message.caption || ctx.callbackQuery.message.text || '';
-        await ctx.editMessageCaption(origCaption + `\n\n❌ *TO'LOV RAD ETILDI.*`, { parse_mode: 'Markdown' });
+        await ctx.editMessageCaption(origCaption + `\n\n❌ <b>TO'LOV RAD ETILDI.</b>`, { parse_mode: 'HTML' });
 
         try {
-            await ctx.telegram.sendMessage(targetUserId, `❌ *Siz yuborgan to'lov cheki rad etildi.*\n\nQayta to'lov qilib chek yuborishingiz yoki adminga murojaat qilishingiz mumkin.`, { parse_mode: 'Markdown' });
+            await ctx.telegram.sendMessage(targetUserId, `❌ <b>Siz yuborgan to'lov cheki rad etildi.</b>\n\nQayta to'lov qilib chek yuborishingiz yoki adminga murojaat qilishingiz mumkin.`, { parse_mode: 'HTML' });
         } catch (err) {
             console.error("Foydalanuvchiga rad xabari yuborishda xato:", err.message);
         }
@@ -535,12 +543,12 @@ bot.on('message', async (ctx) => {
             const uUsername = ctx.from.username ? `@${ctx.from.username}` : "Mavjud emas";
             const uId = ctx.from.id;
 
-            const caption = `📥 *YANGI TO'LOV CHEKI!*\n\n` +
-                `👤 *Foydalanuvchi:* ${uName}\n` +
-                `🆔 *ID:* \`${uId}\`\n` +
-                `🏷 *Username:* ${uUsername}\n` +
-                `📦 *Tanlangan tarif:* ${tariff.name}\n` +
-                `💵 *Summa:* ${tariff.price}`;
+            const caption = `📥 <b>YANGI TO'LOV CHEKI!</b>\n\n` +
+                `👤 <b>Foydalanuvchi:</b> ${escapeHTML(uName)}\n` +
+                `🆔 <b>ID:</b> <code>${uId}</code>\n` +
+                `🏷 <b>Username:</b> ${escapeHTML(uUsername)}\n` +
+                `📦 <b>Tanlangan tarif:</b> ${escapeHTML(tariff.name)}\n` +
+                `💵 <b>Summa:</b> ${escapeHTML(tariff.price)}`;
 
             const keyboard = Markup.inlineKeyboard([
                 [
@@ -552,10 +560,10 @@ bot.on('message', async (ctx) => {
             try {
                 if (isPhoto) {
                     const fileId = message.photo[message.photo.length - 1].file_id;
-                    await ctx.telegram.sendPhoto(ADMIN_ID, fileId, { caption, parse_mode: 'Markdown', ...keyboard });
+                    await ctx.telegram.sendPhoto(ADMIN_ID, fileId, { caption, parse_mode: 'HTML', ...keyboard });
                 } else {
                     const fileId = message.document.file_id;
-                    await ctx.telegram.sendDocument(ADMIN_ID, fileId, { caption, parse_mode: 'Markdown', ...keyboard });
+                    await ctx.telegram.sendDocument(ADMIN_ID, fileId, { caption, parse_mode: 'HTML', ...keyboard });
                 }
 
                 delete userState[userId];
@@ -584,8 +592,8 @@ bot.on('message', async (ctx) => {
             const isPremium = await checkUserPremium(user);
 
             if (!isPremium) {
-                return ctx.reply("🔒 *Kinolarni ko'rish uchun Premium obuna zarur!*\n\nIltimos, quyidagi tariflardan birini tanlang va to'lov qiling:", {
-                    parse_mode: 'Markdown',
+                return ctx.reply("🔒 <b>Kinolarni ko'rish uchun Premium obuna zarur!</b>\n\nIltimos, quyidagi tariflardan birini tanlang va to'lov qiling:", {
+                    parse_mode: 'HTML',
                     ...getTariffKeyboard()
                 });
             }
@@ -635,7 +643,7 @@ async function broadcast(ctx, msgId, isForward, kb = null) {
 bot.action('btn_yes', ctx => {
     if (!adminState[ctx.from.id]) return;
     adminState[ctx.from.id].step = 'ad_btn_data';
-    ctx.reply("Tugma formatini yuboring: `Nomi | Link`", { parse_mode: 'Markdown' });
+    ctx.reply("Tugma formatini yuboring: <code>Nomi | Link</code>", { parse_mode: 'HTML' });
 });
 
 bot.action('btn_no', ctx => {
